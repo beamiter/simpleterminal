@@ -1,14 +1,226 @@
 *simpleterminal.txt*  Local and remote popup terminals for Vim9
 
-:SimpleTerminalNew [command]  Start a terminal for the active workspace.
-:SimpleTerminalToggle         Show or hide the current terminal.
-:SimpleTerminalNext           Switch to the next session.
-:SimpleTerminalPrev           Switch to the previous session.
-:SimpleTerminalKill           Stop and remove the current session.
-:SimpleTerminalSend {text}    Send text followed by Enter.
-:SimpleTerminalList           List sessions.
-:SimpleTerminalHealth         Show integration health.
+                                                *simpleterminal*
+SimpleTerminal keeps any number of terminal sessions and shows one of them at
+a time in a centred popup.  A session is either a shell on this machine or a
+shell in the SimpleRemote workspace (SSH host or Docker container) that was
+active when it was opened; both are driven through the same commands.
 
-SimpleRemote integration is discovered through g:SimpleRemoteTerminalSpec().
+1. Commands                                     |simpleterminal-commands|
+2. Mappings                                     |simpleterminal-mappings|
+3. Options                                      |simpleterminal-options|
+4. Remote workspaces (SimpleRemote)             |simpleterminal-remote|
+5. API                                          |simpleterminal-api|
+
+Requires Vim 9.1 with |+terminal| and |+popupwin|.
+
+==============================================================================
+1. COMMANDS                                     *simpleterminal-commands*
+
+                                                *:SimpleTerminalNew*
+:SimpleTerminalNew[!] [command]
+                Start a new session and show it.  Without [!] the shell is
+                chosen by the active workspace: a SimpleRemote workspace that
+                is ready gets a remote shell, otherwise a local one in the
+                project root (see |simpleterminal-remote|).  With [command]
+                the shell runs that command instead of being interactive.
+                With [!] the session is a LOCAL shell regardless of any
+                workspace or provider hook -- for a `git push` from the
+                laptop while the workspace is a container, say.
+
+                                                *:SimpleTerminalToggle*
+:SimpleTerminalToggle
+                Show the current session's popup, or hide it if it is up.
+                Inside the popup <F8> does the same, <F7> and <S-F7> cycle.
+
+:SimpleTerminalShow                             *:SimpleTerminalShow*
+:SimpleTerminalHide                             *:SimpleTerminalHide*
+                Show / hide the popup.  :SimpleTerminalShow with no session
+                starts one like |:SimpleTerminalNew|.
+
+:SimpleTerminalNext                             *:SimpleTerminalNext*
+:SimpleTerminalPrev                             *:SimpleTerminalPrev*
+                Make the next / previous session current and show it.
+
+                                                *:SimpleTerminalSelect*
+:SimpleTerminalSelect {name}
+                Make the session called {name} current and show it.  {name}
+                completes over the session names; the name a session was
+                opened under still finds it after it was labelled
+                "(detached)", and a bare buffer number is accepted too.
+
+:SimpleTerminalKill                             *:SimpleTerminalKill*
+                Stop the current session's job and wipe its buffer.
+
+                                                *:SimpleTerminalSend*
+:[range]SimpleTerminalSend [text]
+                Type into the current session.  With [range] every line of
+                the range is sent, each followed by Enter -- so
+                `:'<,'>SimpleTerminalSend` runs the visual selection in the
+                shell.  [text] is sent (followed by Enter) after the lines,
+                or on its own when there is no range.  Note that a terminal
+                popup is the current window while it is up (see
+                |popup-terminal|), so hide it first when the lines live in
+                another buffer.
+
+:SimpleTerminalList                             *:SimpleTerminalList*
+                List the sessions, one per line: current marker, buffer
+                number, R for a remote / L for a local shell, name, target
+                (`kind:target` of the workspace, or "local") and whether the
+                shell is still running.
+
+:SimpleTerminalHealth                           *:SimpleTerminalHealth*
+                Report the terminal/popup features, the session count and
+                the SimpleRemote state: whether g:SimpleRemoteTerminalSpec()
+                exists, g:simpleremote_status, and whether the spec is ready
+                to hand out a workspace shell right now.
+
+==============================================================================
+2. MAPPINGS                                     *simpleterminal-mappings*
+
+No keys are bound by default.  Map the <Plug> targets yourself: >
+
+    nmap <F8>   <Plug>(simpleterminal-toggle)
+    nmap <F7>   <Plug>(simpleterminal-next)
+    nmap <S-F7> <Plug>(simpleterminal-prev)
+    nmap <F9>   <Plug>(simpleterminal-new)
+    nmap <S-F9> <Plug>(simpleterminal-new-local)
+<
+    <Plug>(simpleterminal-toggle)      |:SimpleTerminalToggle|
+    <Plug>(simpleterminal-new)         |:SimpleTerminalNew|
+    <Plug>(simpleterminal-new-local)   |:SimpleTerminalNew|! -- a local shell
+    <Plug>(simpleterminal-next)        |:SimpleTerminalNext|
+    <Plug>(simpleterminal-prev)        |:SimpleTerminalPrev|
+
+Inside the popup <F8> toggles it and <F7> / <S-F7> cycle, as terminal-mode
+buffer mappings.
+
+==============================================================================
+3. OPTIONS                                      *simpleterminal-options*
+
+g:simpleterminal_width          (default 82)   *g:simpleterminal_width*
+g:simpleterminal_height         (default 76)   *g:simpleterminal_height*
+                Popup size as a percentage of the Vim window (20-100).
+
+g:simpleterminal_border         (default 1)    *g:simpleterminal_border*
+                Draw a border; its highlight group is SimpleTerminalBorder
+                (linked to FloatBorder).
+
+g:simpleterminal_shell          (default '')   *g:simpleterminal_shell*
+                Shell for local sessions; empty means 'shell'.
+
+                                            *g:simpleterminal_prefer_remote*
+g:simpleterminal_prefer_remote  (default 1)
+                When a SimpleRemote workspace is ready, open new sessions in
+                it.  With 0 every :SimpleTerminalNew is local; the workspace
+                shell then only comes through g:SimpleTerminalSpecProvider.
+
+                                    *g:simpleterminal_remote_on_disconnect*
+g:simpleterminal_remote_on_disconnect  (default 'keep')
+                What happens to the workspace's remote sessions when
+                SimpleRemote disconnects: 'keep' leaves the shells running
+                and labels them "(detached)"; 'kill' stops them and wipes
+                their buffers.  See |simpleterminal-remote|.
+
+                                                *g:SimpleTerminalSpecProvider*
+g:SimpleTerminalSpecProvider
+                Optional funcref, called as (command) and expected to return
+                {command: list<string>, cwd?: string, name?: string,
+                remote?: bool, workspace?: dict}.  A valid result (non-empty
+                command list) takes precedence over the SimpleRemote spec
+                and the local shell; anything else falls through.  Not
+                consulted by |:SimpleTerminalNew|!.
+
+==============================================================================
+4. REMOTE WORKSPACES (SimpleRemote)             *simpleterminal-remote*
+
+Everything here is feature-detected; SimpleTerminal loads and works without
+SimpleRemote installed.
+
+Opening~
+Every new session -- |:SimpleTerminalNew|, and the first one opened by
+:SimpleTerminalToggle / :SimpleTerminalNext -- asks
+g:SimpleRemoteTerminalSpec([command]) for the shell of the active workspace.
+While a workspace is ready the shell runs there (SimpleRemote routes it
+through its runtime, sharing the SSH ControlMaster connection and PATH
+prelude when the runtime supports a tty); the session is named
+`kind:target:root` and marked remote.  When no workspace is ready the shell
+is local, in the project root (g:VimrcProjectRoot() when defined, else the
+current directory), named `local:root`.  A session opened while
+g:simpleremote_status is still 'connecting …' is local as well, and says so:
+"remote workspace still connecting; opening a local shell".
+:SimpleTerminalNew! and <Plug>(simpleterminal-new-local) always open a local
+shell.
+
+What a session remembers~
+Each session records whether it is remote and, from the spec's workspace
+snapshot, the workspace identity {id, kind, target, root} -- available
+through simpleterminal#State() and, on the terminal buffer itself, as
+b:simpleterminal_remote (bool) and b:simpleterminal_workspace (that dict,
+{} for a local shell) so a sibling can recognise a SimpleTerminal buffer and
+where its shell runs.
+
+Disconnecting~
+On `User SimpleRemoteDisconnected` (any reason but 'reconnect') the remote
+sessions of the workspace that went away -- those whose stored workspace id
+is not the id of a still-connected workspace, or the id named in the event
+payload when it carries one -- are DETACHED: with
+g:simpleterminal_remote_on_disconnect = 'keep' (the default) the shell keeps
+running, its ssh/docker process being independent of the connection, and the
+session is renamed "name (detached)" (popup title, :SimpleTerminalList and
+completion follow); with 'kill' the job is stopped and its buffer wiped, as
+:SimpleTerminalKill would.  Local sessions, and remote sessions of a provider
+that gave no workspace identity, are never touched.
+
+A workspace switch fires Disconnected with reason 'reconnect' followed by
+Connecting and Connected; nothing happens on that Disconnected.
+
+Connecting~
+On `User SimpleRemoteConnected` nothing is ever stopped.  Sessions of the
+very same workspace (equal kind, target and root) are re-adopted: they take
+the new connection id, and one that had been labelled "(detached)" by an
+earlier disconnect gets its name back.  Remote sessions of any other
+workspace are labelled "(detached)", so after switching hosts the old shell
+stays recognisable in :SimpleTerminalNext and :SimpleTerminalList -- and is
+adopted back the next time that workspace is connected.
+
+The reverse direction~
+SimpleRemote's :SimpleRemoteTerminal and its popup menu use
+:SimpleTerminalNew when it exists, so a terminal asked for from SimpleRemote
+lands in the same popup and session list.
+
+==============================================================================
+5. API                                          *simpleterminal-api*
+
+For siblings and mappings; all in autoload/simpleterminal.vim.
+
+simpleterminal#New([command [, local]])
+                |:SimpleTerminalNew|; local (bool, default false) is the bang.
+simpleterminal#Run({command}): number
+                Like New({command}) and returns the new terminal's buffer
+                number, or -1 when nothing was started -- for a sibling that
+                wants to run `make` or `cargo test` in the workspace popup
+                and keep a handle on it (:SimpleTerminalSelect accepts the
+                number).
+simpleterminal#Send({text})
+                Type {text} followed by Enter into the current session.
+simpleterminal#SendRange({count}, {line1}, {line2}, {text})
+                |:SimpleTerminalSend|'s entry point: with {count} > 0 the
+                lines {line1}-{line2} of the current buffer, then {text} if
+                non-empty, each followed by Enter.
+simpleterminal#Select({name})           |:SimpleTerminalSelect|
+simpleterminal#Complete({arglead}, {cmdline}, {cursorpos})
+                The completion function behind :SimpleTerminalSelect
+                (substring match over session names).
+simpleterminal#Toggle() / #Show() / #Hide() / #Cycle({delta}) / #Kill()
+simpleterminal#List() / #Health()
+simpleterminal#State(): dict
+                {sessions, current, popup}; each session is {bufnr, name,
+                cwd, remote, workspace: {id, kind, target, root} or {},
+                detached, running, status}.
+simpleterminal#OnRemoteDisconnected() / #OnRemoteConnected()
+                The `User SimpleRemoteDisconnected` / `SimpleRemoteConnected`
+                handlers, installed by the plugin in augroup
+                SimpleTerminalRemote and reading g:simpleremote_event.
 
 vim:tw=78:ts=8:noet:ft=help:norl:

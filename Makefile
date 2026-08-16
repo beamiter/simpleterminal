@@ -1,6 +1,6 @@
-.PHONY: check defcompile test lifecycle
+.PHONY: check defcompile test lifecycle remote
 
-check: defcompile test lifecycle
+check: defcompile test lifecycle remote
 
 defcompile:
 	vim -N -u NONE -n -es -S tests/defcompile.vim
@@ -10,3 +10,6 @@ test:
 
 lifecycle:
 	vim -N -u NONE -n -es -S tests/lifecycle.vim
+
+remote:
+	vim -N -u NONE -n -es -S tests/remote.vim

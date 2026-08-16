@@ -40,7 +40,24 @@ def ValidSpec(value: any): bool
     && !empty(value.command)
 enddef
 
-def Spec(argument: string): dict<any>
+def LocalSpec(argument: string): dict<any>
+  var root = LocalRoot()
+  return {
+    command: ShellCommand(argument),
+    cwd: root,
+    name: 'local:' .. fnamemodify(root, ':t'),
+    remote: false,
+    workspace: {},
+  }
+enddef
+
+def Spec(argument: string, local: bool = false): dict<any>
+  # `local` is :SimpleTerminalNew!'s bang: the user wants a shell on this
+  # machine no matter what workspace is active, so neither the provider hook
+  # nor SimpleRemote gets a say.
+  if local
+    return LocalSpec(argument)
+  endif
   var provider = get(g:, 'SimpleTerminalSpecProvider', v:null)
   if type(provider) == v:t_func
     var provided = call(provider, [argument])
@@ -49,18 +66,35 @@ def Spec(argument: string): dict<any>
     endif
   endif
   if get(g:, 'simpleterminal_prefer_remote', 1)
-      && exists('*g:SimpleRemoteTerminalSpec')
-    var remote = g:SimpleRemoteTerminalSpec(argument)
-    if ValidSpec(remote)
-      return remote
+    if exists('*g:SimpleRemoteTerminalSpec')
+      var remote = g:SimpleRemoteTerminalSpec(argument)
+      if ValidSpec(remote)
+        return remote
+      endif
+    endif
+    # SimpleRemote answers {} until the handshake is done, so a terminal
+    # opened during 'connecting' silently lands on the local machine and the
+    # user only finds out when `ls` shows the wrong files. Say so.
+    if get(g:, 'simpleremote_status', '') =~# '^connecting'
+      Warn('remote workspace still connecting; opening a local shell')
     endif
   endif
-  var root = LocalRoot()
+  return LocalSpec(argument)
+enddef
+
+def WorkspaceIdentity(workspace: any): dict<any>
+  # What a session remembers about the workspace it was opened in. Enough to
+  # recognise the same workspace again (kind, target, root) and to tell one
+  # connection generation from the next (id); the rest of SimpleRemote's
+  # snapshot is not ours to keep.
+  if type(workspace) != v:t_dict || empty(workspace)
+    return {}
+  endif
   return {
-    command: ShellCommand(argument),
-    cwd: root,
-    name: 'local:' .. fnamemodify(root, ':t'),
-    remote: false,
+    id: get(workspace, 'id', -1),
+    kind: get(workspace, 'kind', ''),
+    target: get(workspace, 'target', ''),
+    root: get(workspace, 'root', ''),
   }
 enddef
 
@@ -234,11 +268,22 @@ def OpenPopup(session: dict<any>)
   win_execute(s_popup, 'startinsert')
 enddef
 
-export def New(argument: string = '')
-  var spec = Spec(argument)
+def RefreshTitle(session: dict<any>)
+  # A session's name can change after its popup was opened (see Detach()),
+  # and the popup keeps the title it was created with. Only our own popup, and
+  # only when it is showing this very session.
+  if PopupAlive() && winbufnr(s_popup) == get(session, 'bufnr', -1)
+    popup_setoptions(s_popup, {title: $' {get(session, "name", "terminal")} '})
+  endif
+enddef
+
+def Start(argument: string, local: bool): number
+  # Everything New() does, returning the new session's buffer number -- or -1
+  # -- so that Run() can hand it to a caller.
+  var spec = Spec(argument, local)
   if !ValidSpec(spec)
     Warn('could not build a terminal command')
-    return
+    return -1
   endif
   Hide()
   # No term_finish here, on purpose. It only accepts 'close' or 'open'; the
@@ -261,18 +306,40 @@ export def New(argument: string = '')
   buf = term_start(spec.command, options)
   if buf <= 0
     Warn('term_start() failed')
-    return
+    return -1
   endif
+  var remote = !!get(spec, 'remote', false)
+  var workspace = WorkspaceIdentity(get(spec, 'workspace', {}))
+  # Buffer-local breadcrumbs so a sibling looking at a terminal buffer can
+  # tell it is ours and where its shell runs, without going through State().
+  setbufvar(buf, 'simpleterminal_remote', remote)
+  setbufvar(buf, 'simpleterminal_workspace', workspace)
   add(s_sessions, {
     bufnr: buf,
     name: get(spec, 'name', 'terminal-' .. buf),
     cwd: cwd,
-    remote: get(spec, 'remote', false),
+    remote: remote,
+    workspace: workspace,
+    detached: false,
     running: true,
     status: v:null,
   })
   s_current = len(s_sessions) - 1
   OpenPopup(s_sessions[s_current])
+  return buf
+enddef
+
+export def New(argument: string = '', local: bool = false)
+  # `local` is :SimpleTerminalNew!'s bang -- a shell on this machine even while
+  # a remote workspace is ready. Without it the active workspace decides.
+  Start(argument, local)
+enddef
+
+export def Run(command: string): number
+  # For siblings that want to run something in the workspace terminal and keep
+  # a handle on it: opens the popup like :SimpleTerminalNew {command} and
+  # returns the terminal's buffer number, or -1 when no terminal was started.
+  return Start(command, false)
 enddef
 
 export def Hide()
@@ -304,18 +371,79 @@ export def Toggle()
   endif
 enddef
 
+def SetCurrent(index: number)
+  # Make s_sessions[index] the current session and show it. Callers have
+  # pruned already, so the index is into the live list.
+  Hide()
+  s_current = index
+  Show()
+enddef
+
 export def Cycle(delta: number)
   Prune()
   if empty(s_sessions)
     New('')
     return
   endif
-  Hide()
-  s_current = (s_current + delta) % len(s_sessions)
-  if s_current < 0
-    s_current += len(s_sessions)
+  var index = (s_current + delta) % len(s_sessions)
+  if index < 0
+    index += len(s_sessions)
   endif
-  Show()
+  SetCurrent(index)
+enddef
+
+def BaseName(session: dict<any>): string
+  return substitute(get(session, 'name', ''), ' (detached)$', '', '')
+enddef
+
+def FindSession(name: string): number
+  # Index of the session called `name`, or -1. The name a session was opened
+  # under still finds it after Detach() renamed it, and a bare buffer number is
+  # accepted too, so a caller that kept Run()'s return value can come back.
+  var wanted = trim(name)
+  if empty(wanted)
+    return -1
+  endif
+  for index in range(len(s_sessions))
+    if s_sessions[index].name ==# wanted
+      return index
+    endif
+  endfor
+  for index in range(len(s_sessions))
+    if BaseName(s_sessions[index]) ==# wanted
+      return index
+    endif
+  endfor
+  if wanted =~# '^\d\+$'
+    for index in range(len(s_sessions))
+      if s_sessions[index].bufnr == str2nr(wanted)
+        return index
+      endif
+    endfor
+  endif
+  return -1
+enddef
+
+export def Select(name: string)
+  # Switch to a session by name (or buffer number) instead of cycling to it.
+  Prune()
+  var index = FindSession(name)
+  if index < 0
+    Warn(empty(s_sessions) ? 'no terminal session' : 'no session named ' .. name)
+    return
+  endif
+  SetCurrent(index)
+enddef
+
+export def Complete(arglead: string, _cmdline: string, _cursorpos: number): list<string>
+  # Command-line completion for :SimpleTerminalSelect. Substring rather than
+  # prefix, so 'host' finds 'ssh:host:proj'. No Prune() here: completion must
+  # not wipe buffers behind the user's back.
+  var names = mapnew(s_sessions, (_, session): string => session.name)
+  if !empty(arglead)
+    filter(names, (_, name) => stridx(name, arglead) >= 0)
+  endif
+  return names
 enddef
 
 export def Kill()
@@ -331,7 +459,9 @@ export def Kill()
   Prune()
 enddef
 
-export def Send(text: string)
+def Deliver(lines: list<string>): bool
+  # Type each line, followed by Enter, into the current terminal. Reads
+  # CurrentBuffer() *before* Prune() -- see there for why the order matters.
   var target = CurrentBuffer()
   Prune()
   if !Registered(target)
@@ -347,9 +477,179 @@ export def Send(text: string)
     # three shells are running would send the user looking for the wrong
     # problem -- the sessions are fine, the one they were pointed at has exited.
     Warn(empty(s_sessions) ? 'no terminal session' : 'current terminal has exited')
+    return false
+  endif
+  for line in lines
+    term_sendkeys(target, line .. "\<CR>")
+  endfor
+  return true
+enddef
+
+export def Send(text: string)
+  Deliver([text])
+enddef
+
+export def SendRange(count: number, line1: number, line2: number, text: string)
+  # :SimpleTerminalSend's entry point. With a range (or a count) the lines of
+  # the current buffer go first, one Enter after each; any argument text
+  # follows. `count` is 0 when neither was given, which is how a plain
+  # :SimpleTerminalSend {text} keeps working.
+  var lines: list<string> = []
+  if count > 0
+    lines = getline(line1, line2)
+  endif
+  if !empty(text)
+    add(lines, text)
+  endif
+  if empty(lines)
+    Warn('nothing to send')
     return
   endif
-  term_sendkeys(target, text .. "\<CR>")
+  Deliver(lines)
+enddef
+
+def Detach(session: dict<any>)
+  # The workspace this shell was opened in is gone or no longer the active
+  # one. The shell itself is an independent process and keeps running; only
+  # the label changes so that Cycle() and List() no longer present it as the
+  # active workspace's terminal.
+  if get(session, 'detached', false)
+    return
+  endif
+  session.detached = true
+  session.name = BaseName(session) .. ' (detached)'
+  RefreshTitle(session)
+enddef
+
+def Reattach(session: dict<any>, workspace: dict<any>)
+  # The workspace came back (same kind, target and root); the shell was there
+  # all along. Adopt the new connection generation and drop the label.
+  session.workspace = WorkspaceIdentity(workspace)
+  setbufvar(session.bufnr, 'simpleterminal_workspace', session.workspace)
+  if get(session, 'detached', false)
+    session.detached = false
+    session.name = BaseName(session)
+    RefreshTitle(session)
+  endif
+enddef
+
+def SameWorkspace(session: dict<any>, workspace: dict<any>): bool
+  var mine = get(session, 'workspace', {})
+  if empty(mine) || empty(workspace)
+    return false
+  endif
+  return get(mine, 'kind', '') ==# get(workspace, 'kind', '')
+    && get(mine, 'target', '') ==# get(workspace, 'target', '')
+    && get(mine, 'root', '') ==# get(workspace, 'root', '')
+enddef
+
+def LiveWorkspace(): dict<any>
+  var workspace = get(g:, 'simpleremote_workspace', {})
+  return type(workspace) == v:t_dict ? workspace : {}
+enddef
+
+def Attributable(session: dict<any>): bool
+  # Can the connection events say anything about this session? Only a remote
+  # one that recorded a workspace identity at New() time. A provider hook that
+  # reports remote: true without a workspace is running shells SimpleRemote
+  # knows nothing about, and neither do we -- leave them alone.
+  return get(session, 'remote', false) && !empty(get(session, 'workspace', {}))
+enddef
+
+def WorkspaceGone(session: dict<any>, event: dict<any>): bool
+  # Did the Disconnected event take this session's workspace away? SimpleRemote
+  # unlets g:simpleremote_workspace before it fires, so "still connected" can
+  # only be told from the id the session stored at New() time. A payload that
+  # names the workspace it dropped is trusted first; without one, no live
+  # workspace with our id means ours is the one that went.
+  var mine = get(get(session, 'workspace', {}), 'id', -1)
+  var dropped = get(event, 'workspace', {})
+  if type(dropped) == v:t_dict && has_key(dropped, 'id')
+    return dropped.id == mine
+  endif
+  return get(LiveWorkspace(), 'id', -1) != mine
+enddef
+
+export def OnRemoteDisconnected()
+  # User SimpleRemoteDisconnected. A workspace switch fires this with reason
+  # 'reconnect' before Connecting/Connected; nothing is decided until the new
+  # workspace is known, see OnRemoteConnected(). For a real disconnect the
+  # remote sessions of the workspace that went away are detached -- renamed by
+  # default, stopped when g:simpleterminal_remote_on_disconnect is 'kill'.
+  var event = get(g:, 'simpleremote_event', {})
+  if type(event) != v:t_dict
+    event = {}
+  endif
+  if get(event, 'reason', '') ==# 'reconnect'
+    return
+  endif
+  var kill = get(g:, 'simpleterminal_remote_on_disconnect', 'keep') ==# 'kill'
+  var kept: list<dict<any>> = []
+  for session in s_sessions
+    var gone = Attributable(session)
+      && !get(session, 'detached', false)
+      && WorkspaceGone(session, event)
+    if !gone
+      add(kept, session)
+    elseif !kill
+      Detach(session)
+      add(kept, session)
+    else
+      var bufnr = get(session, 'bufnr', -1)
+      if PopupAlive() && winbufnr(s_popup) == bufnr
+        Hide()
+      endif
+      if bufexists(bufnr)
+        var job = term_getjob(bufnr)
+        if type(job) == v:t_job && job_status(job) ==# 'run'
+          job_stop(job)
+        endif
+        add(s_orphans, bufnr)
+      endif
+    endif
+  endfor
+  s_sessions = kept
+  Prune()
+enddef
+
+export def OnRemoteConnected()
+  # User SimpleRemoteConnected. Nothing destructive: sessions opened in the
+  # workspace that just came (back) up are re-adopted -- a plain reconnect
+  # bumps the connection id, and a session detached by an earlier disconnect
+  # loses the label -- while remote sessions of any other workspace are
+  # labelled detached, so a switch between hosts leaves the old shell
+  # recognisable in Cycle() and List().
+  var workspace = LiveWorkspace()
+  if empty(workspace)
+    var event = get(g:, 'simpleremote_event', {})
+    if type(event) == v:t_dict && has_key(event, 'kind')
+      workspace = event
+    endif
+  endif
+  if empty(workspace)
+    return
+  endif
+  for session in s_sessions
+    if !Attributable(session)
+      continue
+    endif
+    if SameWorkspace(session, workspace)
+      Reattach(session, workspace)
+    else
+      Detach(session)
+    endif
+  endfor
+enddef
+
+def Target(session: dict<any>): string
+  if !get(session, 'remote', false)
+    return 'local'
+  endif
+  var workspace = get(session, 'workspace', {})
+  if empty(get(workspace, 'target', ''))
+    return 'remote'
+  endif
+  return printf('%s:%s', get(workspace, 'kind', ''), workspace.target)
 enddef
 
 export def List()
@@ -360,8 +660,9 @@ export def List()
   endif
   for index in range(len(s_sessions))
     var session = s_sessions[index]
-    echomsg printf('%s %d  %s  %s', index == s_current ? '*' : ' ',
-      session.bufnr, session.name, get(session, 'running', false) ? 'running' : 'exited')
+    echomsg printf('%s %d  %s  %s  %s  %s', index == s_current ? '*' : ' ',
+      session.bufnr, get(session, 'remote', false) ? 'R' : 'L', session.name,
+      Target(session), get(session, 'running', false) ? 'running' : 'exited')
   endfor
 enddef
 
@@ -380,5 +681,14 @@ export def Health()
   echomsg $'  terminal: {has("terminal") ? "yes" : "no"}'
   echomsg $'  popupwin: {has("popupwin") ? "yes" : "no"}'
   echomsg $'  sessions: {len(s_sessions)}'
-  echomsg $'  remote provider: {exists("*g:SimpleRemoteTerminalSpec") ? "available" : "absent"}'
+  var provider = exists('*g:SimpleRemoteTerminalSpec')
+  echomsg $'  remote provider: {provider ? "available" : "absent"}'
+  echomsg $'  remote status: {get(g:, "simpleremote_status", provider ? "unknown" : "n/a")}'
+  var spec = 'n/a'
+  if provider
+    spec = ValidSpec(g:SimpleRemoteTerminalSpec('')) ? 'ready' : 'not ready'
+  endif
+  echomsg $'  remote spec: {spec}'
+  echomsg $'  prefer remote: {get(g:, "simpleterminal_prefer_remote", 1) ? "yes" : "no"}'
+  echomsg $'  on disconnect: {get(g:, "simpleterminal_remote_on_disconnect", "keep")}'
 enddef
