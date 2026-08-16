@@ -18,6 +18,8 @@ vim9script
 #   8. Run() returns the new terminal's buffer number
 #   9. Spec() warns when a shell falls back to local while still connecting
 #  10. Health() reports the SimpleRemote state
+#  11. a kill on disconnect keeps the user on the same terminal
+#  12. a workspace id that is not a number
 
 set nocompatible nomore
 const ROOT = fnamemodify(resolve(expand('<sfile>:p')), ':h:h')
@@ -86,6 +88,22 @@ enddef
 def NewestBuffer(): number
   var sessions = Sessions()
   return empty(sessions) ? -1 : sessions[-1].bufnr
+enddef
+
+def CurrentBuffer(): number
+  # The buffer of the session :SimpleTerminalToggle/Send/Kill would act on.
+  var state = simpleterminal#State()
+  return state.current >= 0 && state.current < len(state.sessions)
+    ? state.sessions[state.current].bufnr : -1
+enddef
+
+def KillAll()
+  var guard = 0
+  while !empty(Sessions()) && guard < 20
+    simpleterminal#Kill()
+    guard += 1
+  endwhile
+  assert_equal([], SessionBuffers(), 'sessions left over from an earlier section')
 enddef
 
 def JobRunning(bufnr: number): bool
@@ -295,11 +313,29 @@ assert_equal('docker:box:work (detached)', SessionByBuffer(docker_buf).name)
 # Only sessions of the workspace that went away are stopped; the docker one is
 # already detached (its workspace is long gone) and stays -- and the local
 # shell is never in question.
+#
+# The user is parked on the local shell, which sits *behind* the ssh one in the
+# list: stopping a session shifts every later one a place forward, so the
+# current session has to be followed by buffer number and not by index --
+# otherwise :SimpleTerminalToggle and :SimpleTerminalSend quietly move on to
+# the next terminal.
+assert_equal([remote_buf, local_buf, docker_buf], SessionBuffers(),
+  'this check needs the doomed ssh session to sit before the current one')
+simpleterminal#Select(string(local_buf))
+assert_equal(local_buf, CurrentBuffer())
 g:simpleterminal_remote_on_disconnect = 'kill'
 Disconnect('disconnect')
 assert_true(WaitExited(remote_buf), 'kill policy left the remote shell running')
 assert_equal(sort([local_buf, docker_buf]), sort(SessionBuffers()),
   'kill policy removed the wrong sessions')
+assert_equal(local_buf, CurrentBuffer(),
+  'stopping an earlier session moved the current one')
+# The user-visible symptom of getting this wrong: the next
+# :SimpleTerminalToggle comes back on whatever session s_current now names.
+simpleterminal#Hide()
+simpleterminal#Show()
+assert_equal(local_buf, winbufnr(simpleterminal#State().popup),
+  ':SimpleTerminalToggle came back on the wrong session after a kill')
 simpleterminal#Hide()
 simpleterminal#State()
 assert_false(bufexists(remote_buf), 'killed remote terminal buffer leaked')
@@ -383,6 +419,71 @@ Connect({id: 11, kind: 'ssh', target: 'host', root: '/srv/proj'})
 health = Captured(simpleterminal#Health)
 assert_match('remote status: ssh:host', health)
 assert_match('remote spec: ready', health)
+
+# --- 11. A kill that takes the current session with it -----------------------
+# The other half of the same bookkeeping: when the shell the user is on is the
+# one the disconnect stops, the session that slides into its place takes over
+# and nothing is left pointing past the end of the list.
+KillAll()
+Connect({id: 12, kind: 'ssh', target: 'host', root: '/srv/proj'})
+simpleterminal#New('sleep 30', true)
+var first_local = NewestBuffer()
+simpleterminal#New('')
+var doomed_buf = NewestBuffer()
+simpleterminal#New('sleep 30', true)
+var last_local = NewestBuffer()
+assert_equal([first_local, doomed_buf, last_local], SessionBuffers())
+simpleterminal#Select(string(doomed_buf))
+assert_equal(doomed_buf, CurrentBuffer())
+g:simpleterminal_remote_on_disconnect = 'kill'
+Disconnect('disconnect')
+assert_true(WaitExited(doomed_buf), 'kill policy left the remote shell running')
+assert_equal([first_local, last_local], SessionBuffers(),
+  'kill policy removed the wrong sessions')
+assert_equal(last_local, CurrentBuffer(),
+  'stopping the current session did not fall through to its neighbour')
+g:simpleterminal_remote_on_disconnect = 'keep'
+simpleterminal#Show()
+assert_equal(last_local, winbufnr(simpleterminal#State().popup),
+  'the popup did not follow the session that took over')
+
+# --- 12. A workspace id that is not a number ---------------------------------
+# What a g:SimpleTerminalSpecProvider returns is documented as a dict; nothing
+# says the workspace id has to be a number. Vim9 refuses to compare a string
+# with a number, so an id like this used to throw E1030 out of the User
+# SimpleRemoteDisconnected autocmd and no session was detached at all.
+KillAll()
+def StringIdProvider(_argument: string): dict<any>
+  return {command: ['sh', '-c', 'sleep 30'], cwd: '/tmp', name: 'strid', remote: true,
+    workspace: {id: 'ws-x', kind: 'ssh', target: 'host', root: '/srv'}}
+enddef
+g:SimpleTerminalSpecProvider = StringIdProvider
+simpleterminal#New('')
+var strid_buf = NewestBuffer()
+assert_true(strid_buf > 0, 'the string-id provider registered no session')
+assert_equal('ws-x', SessionByBuffer(strid_buf).workspace.id, 'the string id was not recorded')
+Disconnect('disconnect')
+assert_equal('strid (detached)', SessionByBuffer(strid_buf).name,
+  'a session with a string workspace id was not detached on disconnect')
+assert_true(JobRunning(strid_buf), 'keep policy killed the string-id shell')
+
+# The workspace comes back under a new string id: same kind/target/root, so the
+# shell is adopted again.
+Connect({id: 'ws-y', kind: 'ssh', target: 'host', root: '/srv'})
+assert_equal('strid', SessionByBuffer(strid_buf).name,
+  'the same workspace under a string id did not re-adopt its session')
+assert_equal('ws-y', SessionByBuffer(strid_buf).workspace.id)
+
+# And a Disconnected payload that names the dropped workspace by string id.
+stub_ready = false
+unlet! g:simpleremote_workspace
+g:simpleremote_status = 'disconnected'
+g:simpleremote_event = {event: 'SimpleRemoteDisconnected', reason: 'disconnect',
+  status: 'disconnected', time: localtime(), workspace: {id: 'ws-y'}}
+doautocmd <nomodeline> User SimpleRemoteDisconnected
+assert_equal('strid (detached)', SessionByBuffer(strid_buf).name,
+  'a payload naming the dropped string id did not detach its session')
+unlet g:SimpleTerminalSpecProvider
 
 # --- Nothing left behind ------------------------------------------------------
 while !empty(Sessions())

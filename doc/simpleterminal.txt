@@ -129,7 +129,8 @@ g:SimpleTerminalSpecProvider
                 remote?: bool, workspace?: dict}.  A valid result (non-empty
                 command list) takes precedence over the SimpleRemote spec
                 and the local shell; anything else falls through.  Not
-                consulted by |:SimpleTerminalNew|!.
+                consulted by |:SimpleTerminalNew|!.  The workspace id may be
+                any value -- it is only ever compared, as text.
 
 ==============================================================================
 4. REMOTE WORKSPACES (SimpleRemote)             *simpleterminal-remote*
@@ -158,7 +159,8 @@ snapshot, the workspace identity {id, kind, target, root} -- available
 through simpleterminal#State() and, on the terminal buffer itself, as
 b:simpleterminal_remote (bool) and b:simpleterminal_workspace (that dict,
 {} for a local shell) so a sibling can recognise a SimpleTerminal buffer and
-where its shell runs.
+where its shell runs.  The id is stored as it came and compared as text, so a
+provider that uses something other than a number for it works too.
 
 Disconnecting~
 On `User SimpleRemoteDisconnected` (any reason but 'reconnect') the remote
@@ -171,6 +173,12 @@ session is renamed "name (detached)" (popup title, :SimpleTerminalList and
 completion follow); with 'kill' the job is stopped and its buffer wiped, as
 :SimpleTerminalKill would.  Local sessions, and remote sessions of a provider
 that gave no workspace identity, are never touched.
+
+Stopping sessions does not move you: the current session is followed by its
+buffer, not by its place in the list, so :SimpleTerminalToggle and
+:SimpleTerminalSend still reach the terminal you were on even when a session
+before it was stopped.  When the stopped one *is* the current session, the
+session that takes its place in the list becomes current.
 
 A workspace switch fires Disconnected with reason 'reconnect' followed by
 Connecting and Connected; nothing happens on that Disconnected.

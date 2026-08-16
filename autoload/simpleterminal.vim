@@ -82,6 +82,17 @@ def Spec(argument: string, local: bool = false): dict<any>
   return LocalSpec(argument)
 enddef
 
+def Text(value: any): string
+  # A workspace field as text. SimpleRemote's own ids are numbers and its kind,
+  # target and root are strings, but the documented type of what a
+  # g:SimpleTerminalSpecProvider hands back is just `dict`, and Vim9 refuses to
+  # compare a string with a number: a provider answering with a string id used
+  # to take the whole User SimpleRemoteDisconnected handler down with E1030 the
+  # moment its id met the numeric default, so the sessions were never detached.
+  # Text is the one form every value has, and 7 and '7' still mean one id.
+  return type(value) == v:t_string ? value : string(value)
+enddef
+
 def WorkspaceIdentity(workspace: any): dict<any>
   # What a session remembers about the workspace it was opened in. Enough to
   # recognise the same workspace again (kind, target, root) and to tell one
@@ -90,11 +101,14 @@ def WorkspaceIdentity(workspace: any): dict<any>
   if type(workspace) != v:t_dict || empty(workspace)
     return {}
   endif
+  # The id is kept as it came -- it is only ever compared, never shown -- while
+  # kind, target and root are the labels List() and Target() print and the keys
+  # SameWorkspace() matches on, so they are stored as text once here.
   return {
     id: get(workspace, 'id', -1),
-    kind: get(workspace, 'kind', ''),
-    target: get(workspace, 'target', ''),
-    root: get(workspace, 'root', ''),
+    kind: Text(get(workspace, 'kind', '')),
+    target: Text(get(workspace, 'target', '')),
+    root: Text(get(workspace, 'root', '')),
   }
 enddef
 
@@ -167,9 +181,25 @@ def Reap()
   s_orphans = pending
 enddef
 
+def IndexOfBuffer(bufnr: number): number
+  # Index of the session owning this buffer in the *current* s_sessions, or -1.
+  # Every place that has to keep s_current on the same terminal across a
+  # rebuild of the list goes through here: an index is only ever valid for the
+  # list it was taken from, so it is remembered as a buffer number and looked
+  # up again afterwards.
+  if bufnr <= 0
+    return -1
+  endif
+  for index in range(len(s_sessions))
+    if get(s_sessions[index], 'bufnr', -1) == bufnr
+      return index
+    endif
+  endfor
+  return -1
+enddef
+
 def Prune()
-  var current_buf = s_current >= 0 && s_current < len(s_sessions)
-    ? get(s_sessions[s_current], 'bufnr', -1) : -1
+  var current_buf = CurrentBuffer()
   var live: list<dict<any>> = []
   for session in s_sessions
     if SessionAlive(session)
@@ -180,13 +210,7 @@ def Prune()
   endfor
   s_sessions = live
   Reap()
-  s_current = -1
-  for index in range(len(s_sessions))
-    if s_sessions[index].bufnr == current_buf
-      s_current = index
-      break
-    endif
-  endfor
+  s_current = IndexOfBuffer(current_buf)
   if s_current < 0 && !empty(s_sessions)
     s_current = len(s_sessions) - 1
   endif
@@ -215,12 +239,7 @@ def Registered(bufnr: number): bool
   # lying around". bufexists() cannot tell them apart -- the buffer outliving
   # the job is deliberate, and is the very thing that made bufexists() useless
   # as a liveness test in SessionAlive().
-  for session in s_sessions
-    if get(session, 'bufnr', -1) == bufnr
-      return true
-    endif
-  endfor
-  return false
+  return IndexOfBuffer(bufnr) >= 0
 enddef
 
 def OnExit(buf: number, _job: any, status: number)
@@ -538,9 +557,11 @@ def SameWorkspace(session: dict<any>, workspace: dict<any>): bool
   if empty(mine) || empty(workspace)
     return false
   endif
-  return get(mine, 'kind', '') ==# get(workspace, 'kind', '')
-    && get(mine, 'target', '') ==# get(workspace, 'target', '')
-    && get(mine, 'root', '') ==# get(workspace, 'root', '')
+  # Text() on both sides: `mine` is normalised, but `workspace` is whatever the
+  # live snapshot or the event payload holds.
+  return Text(get(mine, 'kind', '')) ==# Text(get(workspace, 'kind', ''))
+    && Text(get(mine, 'target', '')) ==# Text(get(workspace, 'target', ''))
+    && Text(get(mine, 'root', '')) ==# Text(get(workspace, 'root', ''))
 enddef
 
 def LiveWorkspace(): dict<any>
@@ -562,12 +583,14 @@ def WorkspaceGone(session: dict<any>, event: dict<any>): bool
   # only be told from the id the session stored at New() time. A payload that
   # names the workspace it dropped is trusted first; without one, no live
   # workspace with our id means ours is the one that went.
-  var mine = get(get(session, 'workspace', {}), 'id', -1)
+  # Ids are compared as text, see Text(): a provider is free to hand back one
+  # that is not a number.
+  var mine = Text(get(get(session, 'workspace', {}), 'id', -1))
   var dropped = get(event, 'workspace', {})
   if type(dropped) == v:t_dict && has_key(dropped, 'id')
-    return dropped.id == mine
+    return Text(dropped.id) ==# mine
   endif
-  return get(LiveWorkspace(), 'id', -1) != mine
+  return Text(get(LiveWorkspace(), 'id', -1)) !=# mine
 enddef
 
 export def OnRemoteDisconnected()
@@ -584,8 +607,25 @@ export def OnRemoteDisconnected()
     return
   endif
   var kill = get(g:, 'simpleterminal_remote_on_disconnect', 'keep') ==# 'kill'
+  # The terminal the user is on, as a buffer number, before the list is rebuilt.
+  # s_current is an index into the list as it stands now, so dropping a session
+  # that sits *before* it slides every later session one place forward and the
+  # index quietly comes to name the wrong shell -- and Prune() below, which
+  # re-derives s_current from s_sessions[s_current], would then anchor onto that
+  # wrong shell rather than notice. :SimpleTerminalToggle and
+  # :SimpleTerminalSend went to somebody else's terminal, which is the one thing
+  # that must never happen quietly.
+  var current_buf = CurrentBuffer()
   var kept: list<dict<any>> = []
-  for session in s_sessions
+  # Where the current session lands in the rebuilt list -- the position it
+  # keeps, or, when it is the one being stopped, the neighbour that slides into
+  # its place. Only used when its buffer is gone from the list.
+  var fallback = -1
+  for index in range(len(s_sessions))
+    var session = s_sessions[index]
+    if index == s_current
+      fallback = len(kept)
+    endif
     var gone = Attributable(session)
       && !get(session, 'detached', false)
       && WorkspaceGone(session, event)
@@ -609,6 +649,10 @@ export def OnRemoteDisconnected()
     endif
   endfor
   s_sessions = kept
+  s_current = IndexOfBuffer(current_buf)
+  if s_current < 0 && !empty(s_sessions)
+    s_current = min([max([fallback, 0]), len(s_sessions) - 1])
+  endif
   Prune()
 enddef
 
