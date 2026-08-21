@@ -131,6 +131,10 @@ g:SimpleTerminalSpecProvider
                 and the local shell; anything else falls through.  Not
                 consulted by |:SimpleTerminalNew|!.  The workspace id may be
                 any value -- it is only ever compared, as text.
+                Invalid results and provider exceptions are reported, then
+                terminal creation falls back to SimpleRemote or the local
+                shell.  All options above are type/range checked at load and
+                again when used.
 
 ==============================================================================
 4. REMOTE WORKSPACES (SimpleRemote)             *simpleterminal-remote*
@@ -177,7 +181,7 @@ that gave no workspace identity, are never touched.
 Stopping sessions does not move you: the current session is followed by its
 buffer, not by its place in the list, so :SimpleTerminalToggle and
 :SimpleTerminalSend still reach the terminal you were on even when a session
-before it was stopped.  When the stopped one *is* the current session, the
+before it was stopped.  When the stopped one IS the current session, the
 session that takes its place in the list becomes current.
 
 A workspace switch fires Disconnected with reason 'reconnect' followed by

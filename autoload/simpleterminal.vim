@@ -16,6 +16,28 @@ def ClampPercent(value: any, fallback: number): number
   return type(value) == v:t_number ? min([100, max([20, value])]) : fallback
 enddef
 
+def ConfFlag(name: string, fallback: bool): bool
+  var value = get(g:, name, fallback)
+  if type(value) == v:t_bool
+    return value
+  endif
+  if type(value) == v:t_number
+    return value != 0
+  endif
+  return fallback
+enddef
+
+def ConfText(name: string, fallback: string): string
+  var value = get(g:, name, fallback)
+  return type(value) == v:t_string ? value : fallback
+enddef
+
+def DisconnectPolicy(): string
+  var value = get(g:, 'simpleterminal_remote_on_disconnect', 'keep')
+  return type(value) == v:t_string && index(['keep', 'kill'], value) >= 0
+    ? value : 'keep'
+enddef
+
 def LocalRoot(): string
   if exists('*g:VimrcProjectRoot')
     var root = g:VimrcProjectRoot()
@@ -27,7 +49,8 @@ def LocalRoot(): string
 enddef
 
 def ShellCommand(argument: string): list<string>
-  var shell = empty(get(g:, 'simpleterminal_shell', '')) ? &shell : g:simpleterminal_shell
+  var configured = ConfText('simpleterminal_shell', '')
+  var shell = empty(configured) ? &shell : configured
   if empty(argument)
     return [shell]
   endif
@@ -35,9 +58,24 @@ def ShellCommand(argument: string): list<string>
 enddef
 
 def ValidSpec(value: any): bool
-  return type(value) == v:t_dict
-    && type(get(value, 'command', 0)) == v:t_list
-    && !empty(value.command)
+  if type(value) != v:t_dict
+      || type(get(value, 'command', 0)) != v:t_list
+      || empty(value.command)
+    return false
+  endif
+  for index in range(len(value.command))
+    var argument = value.command[index]
+    # argv[0] names the executable; later empty strings are legitimate
+    # arguments and must survive exactly (printf, language servers, etc.).
+    if type(argument) != v:t_string || (index == 0 && empty(argument))
+      return false
+    endif
+  endfor
+  return (!has_key(value, 'cwd') || type(value.cwd) == v:t_string)
+    && (!has_key(value, 'name') || type(value.name) == v:t_string)
+    && (!has_key(value, 'remote')
+      || type(value.remote) == v:t_bool || type(value.remote) == v:t_number)
+    && (!has_key(value, 'workspace') || type(value.workspace) == v:t_dict)
 enddef
 
 def LocalSpec(argument: string): dict<any>
@@ -60,17 +98,27 @@ def Spec(argument: string, local: bool = false): dict<any>
   endif
   var provider = get(g:, 'SimpleTerminalSpecProvider', v:null)
   if type(provider) == v:t_func
-    var provided = call(provider, [argument])
-    if ValidSpec(provided)
-      return provided
-    endif
-  endif
-  if get(g:, 'simpleterminal_prefer_remote', 1)
-    if exists('*g:SimpleRemoteTerminalSpec')
-      var remote = g:SimpleRemoteTerminalSpec(argument)
-      if ValidSpec(remote)
-        return remote
+    try
+      var provided = call(provider, [argument])
+      if ValidSpec(provided)
+        return provided
       endif
+      Warn('terminal spec provider returned an invalid specification; falling back')
+    catch
+      Warn('terminal spec provider failed: ' .. v:exception .. '; falling back')
+    endtry
+  endif
+  if ConfFlag('simpleterminal_prefer_remote', true)
+    if exists('*g:SimpleRemoteTerminalSpec')
+      try
+        var remote = g:SimpleRemoteTerminalSpec(argument)
+        if ValidSpec(remote)
+          return remote
+        endif
+      catch
+        Warn('SimpleRemote terminal provider failed: ' .. v:exception
+          .. '; opening a local shell')
+      endtry
     endif
     # SimpleRemote answers {} until the handshake is done, so a terminal
     # opened during 'connecting' silently lands on the local machine and the
@@ -274,7 +322,7 @@ def OpenPopup(session: dict<any>)
     maxwidth: width,
     minheight: height,
     maxheight: height,
-    border: get(g:, 'simpleterminal_border', 1) ? [1, 1, 1, 1] : [0, 0, 0, 0],
+    border: ConfFlag('simpleterminal_border', true) ? [1, 1, 1, 1] : [0, 0, 0, 0],
     borderchars: ['─', '│', '─', '│', '╭', '╮', '╯', '╰'],
     title: $' {get(session, "name", "terminal")} ',
     mapping: false,
@@ -322,7 +370,12 @@ def Start(argument: string, local: bool): number
   endif
   var buf = -1
   options.exit_cb = (job, status) => OnExit(buf, job, status)
-  buf = term_start(spec.command, options)
+  try
+    buf = term_start(spec.command, options)
+  catch
+    Warn('term_start() failed: ' .. v:exception)
+    return -1
+  endtry
   if buf <= 0
     Warn('term_start() failed')
     return -1
@@ -606,7 +659,7 @@ export def OnRemoteDisconnected()
   if get(event, 'reason', '') ==# 'reconnect'
     return
   endif
-  var kill = get(g:, 'simpleterminal_remote_on_disconnect', 'keep') ==# 'kill'
+  var kill = DisconnectPolicy() ==# 'kill'
   # The terminal the user is on, as a buffer number, before the list is rebuilt.
   # s_current is an index into the list as it stands now, so dropping a session
   # that sits *before* it slides every later session one place forward and the
@@ -730,9 +783,13 @@ export def Health()
   echomsg $'  remote status: {get(g:, "simpleremote_status", provider ? "unknown" : "n/a")}'
   var spec = 'n/a'
   if provider
-    spec = ValidSpec(g:SimpleRemoteTerminalSpec('')) ? 'ready' : 'not ready'
+    try
+      spec = ValidSpec(g:SimpleRemoteTerminalSpec('')) ? 'ready' : 'not ready'
+    catch
+      spec = 'error: ' .. v:exception
+    endtry
   endif
   echomsg $'  remote spec: {spec}'
-  echomsg $'  prefer remote: {get(g:, "simpleterminal_prefer_remote", 1) ? "yes" : "no"}'
-  echomsg $'  on disconnect: {get(g:, "simpleterminal_remote_on_disconnect", "keep")}'
+  echomsg $'  prefer remote: {ConfFlag("simpleterminal_prefer_remote", true) ? "yes" : "no"}'
+  echomsg $'  on disconnect: {DisconnectPolicy()}'
 enddef

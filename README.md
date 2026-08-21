@@ -22,4 +22,8 @@ returns its buffer number; `simpleterminal#Select(name)`,
 `simpleterminal#SendRange(...)`, `simpleterminal#State()`; terminal buffers
 carry `b:simpleterminal_remote` and `b:simpleterminal_workspace`.
 
+Configuration is normalized at load and rechecked where it is consumed.
+Malformed custom or SimpleRemote terminal providers are reported and fall back
+to a local shell instead of aborting the command or `:SimpleTerminalHealth`.
+
 See `:help simpleterminal`.
