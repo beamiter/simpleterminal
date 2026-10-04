@@ -176,6 +176,9 @@ assert_true(WaitExited(onscreen_buf), 'on-screen shell never exited')
 
 assert_equal([long_buf], SessionBuffers(), 'session on screen was not pruned')
 assert_true(bufexists(onscreen_buf), 'buffer was wiped out from under the popup')
+var health_orphan = execute('silent simpleterminal#Health()')
+assert_match('pending wipe: 1', health_orphan,
+  'Health() hid an unreaped terminal buffer')
 
 simpleterminal#Hide()
 simpleterminal#State()
@@ -246,6 +249,16 @@ simpleterminal#Toggle()
 assert_true(simpleterminal#State().popup > 0, 'Toggle() failed to reopen')
 simpleterminal#Toggle()
 assert_equal(0, simpleterminal#State().popup, 'Toggle() failed to close')
+
+# State() used to keep reporting a popup_close()'d id as live.
+simpleterminal#Show()
+var ghost = simpleterminal#State().popup
+assert_true(ghost > 0, 'Show() opened no popup to ghost')
+popup_close(ghost)
+assert_equal(0, simpleterminal#State().popup,
+  'State() reported a closed popup as still open')
+var health_closed = execute('silent simpleterminal#Health()')
+assert_match('popup: closed', health_closed)
 
 # The same stale id, but reaching Toggle() directly this time -- no Hide() in
 # between to clear it. A test that only asks "is s_popup non-zero" concludes the

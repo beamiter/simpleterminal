@@ -13,7 +13,15 @@ def Warn(message: string)
 enddef
 
 def ClampPercent(value: any, fallback: number): number
-  return type(value) == v:t_number ? min([100, max([20, value])]) : fallback
+  var n = fallback
+  if type(value) == v:t_float
+    n = float2nr(value)
+  elseif type(value) == v:t_number
+    n = value
+  else
+    return fallback
+  endif
+  return min([100, max([20, n])])
 enddef
 
 def ConfFlag(name: string, fallback: bool): bool
@@ -34,16 +42,22 @@ enddef
 
 def DisconnectPolicy(): string
   var value = get(g:, 'simpleterminal_remote_on_disconnect', 'keep')
-  return type(value) == v:t_string && index(['keep', 'kill'], value) >= 0
-    ? value : 'keep'
+  if type(value) != v:t_string
+    return 'keep'
+  endif
+  var lowered = tolower(value)
+  return index(['keep', 'kill'], lowered) >= 0 ? lowered : 'keep'
 enddef
 
 def LocalRoot(): string
   if exists('*g:VimrcProjectRoot')
-    var root = g:VimrcProjectRoot()
-    if isdirectory(root)
-      return root
-    endif
+    try
+      var root = g:VimrcProjectRoot()
+      if type(root) == v:t_string && isdirectory(root)
+        return root
+      endif
+    catch
+    endtry
   endif
   return getcwd()
 enddef
@@ -352,7 +366,6 @@ def Start(argument: string, local: bool): number
     Warn('could not build a terminal command')
     return -1
   endif
-  Hide()
   # No term_finish here, on purpose. It only accepts 'close' or 'open'; the
   # 'noclose' that used to sit here is not a value at all, so term_start() threw
   # E475 and took all of New() down with it -- every :SimpleTerminalNew failed
@@ -365,8 +378,12 @@ def Start(argument: string, local: bool): number
     term_name: 'SimpleTerminal:' .. get(spec, 'name', 'shell'),
   }
   var cwd = get(spec, 'cwd', '')
-  if type(cwd) == v:t_string && isdirectory(cwd)
-    options.cwd = cwd
+  if type(cwd) == v:t_string && !empty(cwd)
+    if isdirectory(cwd)
+      options.cwd = cwd
+    else
+      Warn('cwd is not a directory: ' .. cwd .. '; using the current directory')
+    endif
   endif
   var buf = -1
   options.exit_cb = (job, status) => OnExit(buf, job, status)
@@ -380,6 +397,10 @@ def Start(argument: string, local: bool): number
     Warn('term_start() failed')
     return -1
   endif
+  # Close the previous popup only after the new job exists: a failed New()
+  # used to Hide() first and leave the user staring at an empty screen while
+  # the still-running session sat hidden.
+  Hide()
   var remote = !!get(spec, 'remote', false)
   var workspace = WorkspaceIdentity(get(spec, 'workspace', {}))
   # Buffer-local breadcrumbs so a sibling looking at a terminal buffer can
@@ -512,6 +533,12 @@ export def Complete(arglead: string, _cmdline: string, _cursorpos: number): list
   # prefix, so 'host' finds 'ssh:host:proj'. No Prune() here: completion must
   # not wipe buffers behind the user's back.
   var names = mapnew(s_sessions, (_, session): string => session.name)
+  for session in s_sessions
+    var buf = string(get(session, 'bufnr', 0))
+    if index(names, buf) < 0
+      add(names, buf)
+    endif
+  endfor
   if !empty(arglead)
     filter(names, (_, name) => stridx(name, arglead) >= 0)
   endif
@@ -768,7 +795,7 @@ export def State(): dict<any>
   return {
     sessions: deepcopy(s_sessions),
     current: s_current,
-    popup: s_popup,
+    popup: PopupAlive() ? s_popup : 0,
   }
 enddef
 
@@ -777,7 +804,9 @@ export def Health()
   echomsg 'SimpleTerminal health'
   echomsg $'  terminal: {has("terminal") ? "yes" : "no"}'
   echomsg $'  popupwin: {has("popupwin") ? "yes" : "no"}'
+  echomsg $'  popup: {PopupAlive() ? "open" : "closed"}'
   echomsg $'  sessions: {len(s_sessions)}'
+  echomsg $'  pending wipe: {len(filter(copy(s_orphans), (_, bufnr) => bufexists(bufnr)))}'
   var provider = exists('*g:SimpleRemoteTerminalSpec')
   echomsg $'  remote provider: {provider ? "available" : "absent"}'
   echomsg $'  remote status: {get(g:, "simpleremote_status", provider ? "unknown" : "n/a")}'

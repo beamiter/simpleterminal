@@ -382,8 +382,11 @@ execute 'SimpleTerminalSelect ' .. SessionByBuffer(local_buf).name
 assert_equal(local_buf, winbufnr(simpleterminal#State().popup), ':SimpleTerminalSelect failed')
 
 var completions = simpleterminal#Complete('', 'SimpleTerminalSelect ', 21)
-assert_equal(sort(['docker:box:work (detached)', SessionByBuffer(local_buf).name]), sort(completions))
+assert_equal(sort(['docker:box:work (detached)', SessionByBuffer(local_buf).name,
+  string(docker_buf), string(local_buf)]), sort(completions))
 assert_equal(['docker:box:work (detached)'], simpleterminal#Complete('box', '', 0))
+assert_true(index(completions, string(local_buf)) >= 0,
+  'Complete() did not offer the session buffer number Select() accepts')
 assert_equal(['docker:box:work (detached)'], getcompletion('SimpleTerminalSelect box', 'cmdline'))
 
 # --- 8. Run() ---------------------------------------------------------------

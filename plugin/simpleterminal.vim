@@ -23,8 +23,15 @@ def Flag(value: any, fallback: number): number
 enddef
 
 def Percent(value: any, fallback: number): number
-  return type(value) == v:t_number
-    ? min([100, max([20, value])]) : fallback
+  var n = fallback
+  if type(value) == v:t_float
+    n = float2nr(value)
+  elseif type(value) == v:t_number
+    n = value
+  else
+    return fallback
+  endif
+  return min([100, max([20, n])])
 enddef
 
 def Text(value: any, fallback: string): string
@@ -32,8 +39,11 @@ def Text(value: any, fallback: string): string
 enddef
 
 def Choice(value: any, fallback: string): string
-  return type(value) == v:t_string && index(['keep', 'kill'], value) >= 0
-    ? value : fallback
+  if type(value) != v:t_string
+    return fallback
+  endif
+  var lowered = tolower(value)
+  return index(['keep', 'kill'], lowered) >= 0 ? lowered : fallback
 enddef
 
 g:simpleterminal_width = Percent(get(g:, 'simpleterminal_width', 82), 82)
