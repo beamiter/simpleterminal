@@ -235,4 +235,21 @@ simpleterminal#OnRemoteDisconnected() / #OnRemoteConnected()
                 handlers, installed by the plugin in augroup
                 SimpleTerminalRemote and reading g:simpleremote_event.
 
+
+NATIVE SOURCE WORKFLOWS                       *simpleterminal-workbench*
+
+simpleterminal#WorkbenchTarget(root, workspace) returns an empty dictionary or
+{buffer: N} for the existing current, live, attached session owned by that
+source workspace. Reads do not prune sessions, select another shell, invoke a
+remote provider or start a process. Local ownership compares the session's
+recorded startup cwd; remote ownership compares kind, target, root and
+connection id. Callers must independently prove their source-buffer identity.
+
+simpleterminal#SendWorkbenchLine(root, workspace, text) is an explicit action:
+it rechecks the proof, retains its exact terminal buffer across pruning and
+sends the literal line followed by Enter. It never creates or chooses a
+replacement terminal. Empty/whitespace lines, lines over 4096 UTF-8 bytes and
+control characters other than Tab are refused before any bytes are sent.
+Existing Send(), SendRange() and user mappings retain their original behavior.
+
 vim:tw=78:ts=8:noet:ft=help:norl:

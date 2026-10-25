@@ -790,6 +790,50 @@ export def List()
   endfor
 enddef
 
+# A read-only target proof for the native workbench. Unlike State(), this
+# never Prune()s, switches the current session, spawns a shell or calls a
+# remote provider. Exact workspace ownership is sampled again before send.
+export def WorkbenchTarget(root: string, workspace: dict<any>): dict<any>
+  if s_current < 0 || s_current >= len(s_sessions)
+    return {}
+  endif
+  var session = s_sessions[s_current]
+  var target = get(session, 'bufnr', -1)
+  if !get(session, 'running', false) || get(session, 'detached', false)
+      || target <= 0 || !bufexists(target) || term_getstatus(target) !~# 'running'
+    return {}
+  endif
+  if get(session, 'remote', false)
+    if empty(workspace) || !SameWorkspace(session, workspace)
+        || Text(get(get(session, 'workspace', {}), 'id', -1)) !=# Text(get(workspace, 'id', -2))
+      return {}
+    endif
+  elseif !empty(workspace) || empty(root) || get(session, 'cwd', '') !=# root
+    return {}
+  endif
+  return {buffer: target}
+enddef
+
+# This is an explicit editor action, never an automatic reaction to a read or
+# state update. Text goes directly to the existing PTY, not through :execute.
+export def SendWorkbenchLine(root: string, workspace: dict<any>, text: string)
+  if strlen(text) > 4096 || empty(trim(text))
+      || substitute(text, "\t", '', 'g') =~# '[[:cntrl:]]'
+    throw '[SimpleTerminal] source line is empty, oversized or contains control keys'
+  endif
+  var proof = WorkbenchTarget(root, workspace)
+  if empty(proof)
+    throw '[SimpleTerminal] no live current terminal for this exact source workspace'
+  endif
+  var target = proof.buffer
+  Prune()
+  if CurrentBuffer() != target || !Registered(target)
+    throw '[SimpleTerminal] current terminal exited or changed before delivery'
+  endif
+  # Keep the exact proved PTY even if pruning retired a neighbouring session.
+  term_sendkeys(target, text .. "\<CR>")
+enddef
+
 export def State(): dict<any>
   Prune()
   return {
