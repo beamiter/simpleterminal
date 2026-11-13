@@ -117,10 +117,11 @@ def Spec(argument: string, local: bool = false): dict<any>
       if ValidSpec(provided)
         return provided
       endif
-      Warn('terminal spec provider returned an invalid specification; falling back')
+      Warn('terminal spec provider returned an invalid specification; refusing to start; use :SimpleTerminalNew! for local')
     catch
-      Warn('terminal spec provider failed: ' .. v:exception .. '; falling back')
+      Warn('terminal spec provider failed: ' .. v:exception .. '; refusing to start; use :SimpleTerminalNew! for local')
     endtry
+    return {}
   endif
   if ConfFlag('simpleterminal_prefer_remote', true)
     if exists('*g:SimpleRemoteTerminalSpec')
@@ -129,16 +130,24 @@ def Spec(argument: string, local: bool = false): dict<any>
         if ValidSpec(remote)
           return remote
         endif
+        # Only an empty dictionary means "no workspace". A malformed spec
+        # must never turn a command intended for another machine into local work.
+        if type(remote) != v:t_dict || !empty(remote)
+          Warn('SimpleRemote terminal provider returned an invalid specification; refusing to start')
+          return {}
+        endif
       catch
         Warn('SimpleRemote terminal provider failed: ' .. v:exception
-          .. '; opening a local shell')
+          .. '; refusing to start; use :SimpleTerminalNew! for local')
+        return {}
       endtry
     endif
-    # SimpleRemote answers {} until the handshake is done, so a terminal
-    # opened during 'connecting' silently lands on the local machine and the
-    # user only finds out when `ls` shows the wrong files. Say so.
-    if get(g:, 'simpleremote_status', '') =~# '^connecting'
-      Warn('remote workspace still connecting; opening a local shell')
+    var status = get(g:, 'simpleremote_status', '')
+    if !empty(get(g:, 'simpleremote_workspace', {}))
+        || type(status) != v:t_string
+        || (status !=# '' && status !=# 'disconnected')
+      Warn('remote workspace is not ready; refusing to start; use :SimpleTerminalNew! for local')
+      return {}
     endif
   endif
   return LocalSpec(argument)

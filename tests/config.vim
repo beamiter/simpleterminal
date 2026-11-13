@@ -19,7 +19,11 @@ assert_equal(1, g:simpleterminal_prefer_remote)
 assert_equal('', g:simpleterminal_shell)
 assert_equal('keep', g:simpleterminal_remote_on_disconnect)
 
+var remote_invalid = false
 def g:SimpleRemoteTerminalSpec(_argument: string = ''): dict<any>
+  if remote_invalid
+    return {command: []}
+  endif
   throw 'remote provider exploded'
 enddef
 var health = execute('silent simpleterminal#Health()')
@@ -33,8 +37,10 @@ g:simpleterminal_prefer_remote = 0
 g:simpleterminal_shell = {}
 var output = execute("silent simpleterminal#New('sleep 30')")
 assert_match('terminal spec provider failed: .*custom provider exploded', output)
-assert_equal(1, len(simpleterminal#State().sessions),
-  'a broken provider still falls back to a local terminal')
+assert_equal(0, len(simpleterminal#State().sessions),
+  'a broken provider must not fall back to a local terminal')
+simpleterminal#New('sleep 30', true)
+assert_equal(1, len(simpleterminal#State().sessions), 'explicit local bypass failed')
 simpleterminal#Kill()
 
 def EmptyArgumentProvider(_argument: string): dict<any>
@@ -46,8 +52,24 @@ assert_equal('empty-argument', simpleterminal#State().sessions[0].name,
   'an empty non-executable argv item remains a valid provider argument')
 simpleterminal#Kill()
 
+def InvalidProvider(_argument: string): dict<any>
+  return {command: []}
+enddef
+g:SimpleTerminalSpecProvider = InvalidProvider
+assert_equal(-1, simpleterminal#Run('sleep 30'))
+assert_equal([], simpleterminal#State().sessions)
 unlet g:SimpleTerminalSpecProvider
+g:simpleterminal_prefer_remote = 1
+assert_equal(-1, simpleterminal#Run('sleep 30'), 'throwing remote provider ran locally')
+assert_equal([], simpleterminal#State().sessions)
+remote_invalid = true
+assert_equal(-1, simpleterminal#Run('sleep 30'), 'invalid remote provider ran locally')
+assert_equal([], simpleterminal#State().sessions)
 delfunction g:SimpleRemoteTerminalSpec
+# A missing provider cannot erase an active remote workspace either.
+g:simpleremote_status = 'connecting ssh:host'
+assert_equal(-1, simpleterminal#Run('sleep 30'))
+unlet g:simpleremote_status
 
 def g:VimrcProjectRoot(): any
   throw 'project root exploded'

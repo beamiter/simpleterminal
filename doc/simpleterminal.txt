@@ -128,12 +128,12 @@ g:SimpleTerminalSpecProvider
                 {command: list<string>, cwd?: string, name?: string,
                 remote?: bool, workspace?: dict}.  A valid result (non-empty
                 command list) takes precedence over the SimpleRemote spec
-                and the local shell; anything else falls through.  Not
+                and the local shell.  Invalid results refuse creation.  Not
                 consulted by |:SimpleTerminalNew|!.  The workspace id may be
                 any value -- it is only ever compared, as text.
-                Invalid results and provider exceptions are reported, then
-                terminal creation falls back to SimpleRemote or the local
-                shell.  All options above are type/range checked at load and
+                Invalid results (including {}) and provider exceptions are
+                reported; no terminal is started and Run() returns -1.
+                Use :SimpleTerminalNew! to explicitly run locally.  All options above are type/range checked at load and
                 again when used.
 
 ==============================================================================
@@ -149,13 +149,17 @@ g:SimpleRemoteTerminalSpec([command]) for the shell of the active workspace.
 While a workspace is ready the shell runs there (SimpleRemote routes it
 through its runtime, sharing the SSH ControlMaster connection and PATH
 prelude when the runtime supports a tty); the session is named
-`kind:target:root` and marked remote.  When no workspace is ready the shell
-is local, in the project root (g:VimrcProjectRoot() when defined, else the
-current directory), named `local:root`.  A session opened while
-g:simpleremote_status is still 'connecting …' is local as well, and says so:
-"remote workspace still connecting; opening a local shell".
+`kind:target:root` and marked remote.  When there is no active or connecting
+workspace, an empty SimpleRemote spec selects a local shell in the project root
+(g:VimrcProjectRoot() when defined, else the current directory), named
+`local:root`.  Connecting, active-but-unavailable or error states refuse to
+start: a command intended for another machine must not run locally.  A nonempty
+workspace snapshot also blocks fallback.  Malformed or throwing providers
+refuse creation regardless of status.  This applies to commands and interactive
+shells, leaves existing sessions unchanged, and makes Run() return -1.
 :SimpleTerminalNew! and <Plug>(simpleterminal-new-local) always open a local
-shell.
+shell, bypassing both providers.  Setting g:simpleterminal_prefer_remote to 0
+bypasses SimpleRemote, but still consults a custom spec provider.
 
 What a session remembers~
 Each session records whether it is remote and, from the spec's workspace

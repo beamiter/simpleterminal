@@ -16,7 +16,7 @@ vim9script
 #   6. SendRange(): a range types each line, plain text still works
 #   7. Select() by name / base name / bufnr, Complete()
 #   8. Run() returns the new terminal's buffer number
-#   9. Spec() warns when a shell falls back to local while still connecting
+#   9. Spec() refuses implicit local execution while a workspace is pending
 #  10. Health() reports the SimpleRemote state
 #  11. a kill on disconnect keeps the user on the same terminal
 #  12. a workspace id that is not a number
@@ -398,18 +398,37 @@ assert_equal('ssh:host:proj', SessionByBuffer(run_buf).name, 'Run() did not use 
 assert_equal('sleep 30', stub_calls[-1], 'Run() did not pass its command to the spec')
 assert_equal(run_buf, winbufnr(simpleterminal#State().popup))
 
-# --- 9. Local fallback while still connecting ------------------------------
+# --- 9. Remote intent must not execute locally ------------------------------
 Disconnect('disconnect')
+var rejected_baseline = simpleterminal#State()
+var marker = tempname()
+for status in ['connecting ssh:host', 'ssh:host', 'error: connection failed']
+  g:simpleremote_status = status
+  assert_equal(-1, simpleterminal#Run('touch ' .. shellescape(marker)))
+  assert_equal(rejected_baseline.sessions, simpleterminal#State().sessions)
+  assert_equal(rejected_baseline.current, simpleterminal#State().current)
+  assert_equal(rejected_baseline.popup, simpleterminal#State().popup)
+endfor
+# A workspace snapshot is also evidence of intent, even without status.
+g:simpleremote_status = ''
+g:simpleremote_workspace = copy(stub_workspace)
+assert_equal(-1, simpleterminal#Run('touch ' .. shellescape(marker)))
+unlet g:simpleremote_workspace
+sleep 100m
+assert_false(filereadable(marker), 'rejected remote command ran locally')
+# Explicit local execution bypasses the unavailable remote provider.
 g:simpleremote_status = 'connecting ssh:host'
-var connecting = Captured(() => simpleterminal#New('sleep 30'))
-assert_match('still connecting; opening a local shell', connecting,
-  'the local fallback during connecting was silent')
-var fallback_buf = NewestBuffer()
-assert_match('^local:', SessionByBuffer(fallback_buf).name)
-assert_false(SessionByBuffer(fallback_buf).remote)
-# The bang path says nothing: the user asked for local.
 var quiet = Captured(() => simpleterminal#New('sleep 30', true))
-assert_notmatch('still connecting', quiet, 'SimpleTerminalNew! warned about a fallback it did not take')
+assert_notmatch('refusing', quiet)
+assert_false(SessionByBuffer(NewestBuffer()).remote)
+assert_equal(len(rejected_baseline.sessions) + 1, len(Sessions()))
+# Disconnected genuinely means local; prefer_remote=0 is another explicit opt-out.
+g:simpleremote_status = 'disconnected'
+assert_true(simpleterminal#Run('sleep 30') > 0)
+g:simpleremote_status = 'connecting ssh:host'
+g:simpleterminal_prefer_remote = 0
+assert_true(simpleterminal#Run('sleep 30') > 0)
+g:simpleterminal_prefer_remote = 1
 g:simpleremote_status = 'disconnected'
 
 # --- 10. Health() -----------------------------------------------------------
