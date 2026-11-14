@@ -68,7 +68,10 @@ def ShellCommand(argument: string): list<string>
   if empty(argument)
     return [shell]
   endif
-  return [shell, &shellcmdflag, argument]
+  # On Unix Vim passes each whitespace-separated shellcmdflag separately.
+  # Keep the command itself intact, and preserve the Windows flag convention.
+  var flags = has('unix') ? split(&shellcmdflag) : [&shellcmdflag]
+  return [shell] + flags + [argument]
 enddef
 
 def ValidSpec(value: any): bool

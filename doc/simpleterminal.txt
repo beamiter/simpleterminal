@@ -108,6 +108,9 @@ g:simpleterminal_border         (default 1)    *g:simpleterminal_border*
 
 g:simpleterminal_shell          (default '')   *g:simpleterminal_shell*
                 Shell for local sessions; empty means 'shell'.
+                Commands use 'shellcmdflag'; on Unix its whitespace-separated
+                flags are passed individually (for example, -e -c). The whole
+                command remains a single argument after those flags.
 
                                             *g:simpleterminal_prefer_remote*
 g:simpleterminal_prefer_remote  (default 1)

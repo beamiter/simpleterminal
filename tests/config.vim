@@ -119,6 +119,38 @@ unlet g:SimpleTerminalSpecProvider
 g:simpleterminal_width = 82
 g:simpleterminal_height = 76
 
+# Unix shellcmdflag may contain separate flags, not one combined argument.
+# Run a real shell and verify the complete command (including quoted spaces)
+# survives as one argv item after those flags.
+if has('unix')
+  var saved_shell = &shell
+  var saved_flags = &shellcmdflag
+  var result_file = tempname()
+  &shell = '/bin/sh'
+  g:simpleterminal_shell = ''
+  for flags in ['-c', "  -e\t-c  "]
+    &shellcmdflag = flags
+    var command = "printf '%s\n' 'two words' 'literal; value' > "
+      .. shellescape(result_file) .. '; sleep 30'
+    simpleterminal#New(command, true)
+    for attempt in range(100)
+      if filereadable(result_file)
+          && readfile(result_file) == ['two words', 'literal; value']
+        break
+      endif
+      sleep 10m
+    endfor
+    assert_true(filereadable(result_file), 'shell flags failed: ' .. flags)
+    if filereadable(result_file)
+      assert_equal(['two words', 'literal; value'], readfile(result_file))
+    endif
+    simpleterminal#Kill()
+    delete(result_file)
+  endfor
+  &shell = saved_shell
+  &shellcmdflag = saved_flags
+endif
+
 g:simpleterminal_remote_on_disconnect = 'KILL'
 var health_kill = execute('silent simpleterminal#Health()')
 assert_match('on disconnect: kill', health_kill)
