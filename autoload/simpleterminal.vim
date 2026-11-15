@@ -394,7 +394,10 @@ def Start(argument: string, local: bool): number
     if isdirectory(cwd)
       options.cwd = cwd
     else
-      Warn('cwd is not a directory: ' .. cwd .. '; using the current directory')
+      # cwd is part of the execution target, not a cosmetic preference. A
+      # vanished project must not redirect its command into the editor's cwd.
+      Warn('cwd is not a directory: ' .. cwd .. '; refusing to start')
+      return -1
     endif
   endif
   var buf = -1

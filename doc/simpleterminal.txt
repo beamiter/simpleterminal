@@ -136,6 +136,10 @@ g:SimpleTerminalSpecProvider
                 any value -- it is only ever compared, as text.
                 Invalid results (including {}) and provider exceptions are
                 reported; no terminal is started and Run() returns -1.
+                A non-empty cwd must be an existing directory. If it is
+                missing or a file, creation is refused rather than executing
+                in the current directory; the existing terminal stays open.
+                An omitted or empty cwd still inherits the current directory.
                 Use :SimpleTerminalNew! to explicitly run locally.  All options above are type/range checked at load and
                 again when used.
 

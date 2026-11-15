@@ -90,16 +90,63 @@ assert_equal(1, len(simpleterminal#State().sessions),
 simpleterminal#Kill()
 delfunction g:VimrcProjectRoot
 
-def BadCwd(_argument: string): dict<any>
-  return {command: ['sh', '-c', 'sleep 30'], cwd: '/etc/hostname',
-    name: 'bad-cwd', remote: false}
+# A requested working directory is part of the command's execution target.
+# Refusing a bad cwd must leave the existing terminal and popup untouched.
+var cwd_fixture = tempname()
+mkdir(cwd_fixture, 'p')
+var output_path = cwd_fixture .. '/ran.txt'
+writefile(['not a directory'], cwd_fixture .. '/plain-file')
+var requested_cwd = ''
+def CwdProvider(_argument: string): dict<any>
+  return {command: ['sh', '-c', 'pwd > ' .. shellescape(output_path) .. '; sleep 30'],
+    cwd: requested_cwd, name: 'cwd-check', remote: false}
 enddef
-g:SimpleTerminalSpecProvider = BadCwd
-var cwdmsg = execute('silent simpleterminal#New("")')
-assert_match('cwd is not a directory', cwdmsg)
-assert_equal('bad-cwd', simpleterminal#State().sessions[0].name)
+simpleterminal#New('sleep 30', true)
+var original = simpleterminal#State()
+g:SimpleTerminalSpecProvider = CwdProvider
+for bad_cwd in [cwd_fixture .. '/missing', cwd_fixture .. '/plain-file']
+  requested_cwd = bad_cwd
+  var result = 0
+  var cwdmsg = execute('result = simpleterminal#Run("")')
+  assert_equal(-1, result, 'invalid cwd started a command in another directory')
+  assert_match('cwd is not a directory.*refusing to start', cwdmsg)
+  sleep 50m
+  assert_false(filereadable(output_path), 'command ran despite invalid cwd')
+  var after = simpleterminal#State()
+  assert_equal(original.sessions, after.sessions, 'failed start changed sessions')
+  assert_equal(original.current, after.current, 'failed start changed current')
+  assert_equal(original.popup, after.popup, 'failed start replaced the popup')
+  # Also reap any wrongly-created job when testing the old implementation.
+  if result > 0
+    simpleterminal#Kill()
+    simpleterminal#Show()
+    original = simpleterminal#State()
+    delete(output_path)
+  endif
+endfor
 simpleterminal#Kill()
+
+# Valid directories with spaces and an explicitly empty cwd still work.
+mkdir(cwd_fixture .. '/with spaces', 'p')
+for good_cwd in [cwd_fixture .. '/with spaces', '']
+  requested_cwd = good_cwd
+  var result = simpleterminal#Run('')
+  assert_true(result > 0, 'valid cwd was refused')
+  for attempt in range(100)
+    if filereadable(output_path) && !empty(readfile(output_path))
+      break
+    endif
+    sleep 10m
+  endfor
+  assert_true(filereadable(output_path))
+  if filereadable(output_path)
+    assert_equal([empty(good_cwd) ? getcwd() : good_cwd], readfile(output_path))
+  endif
+  simpleterminal#Kill()
+  delete(output_path)
+endfor
 unlet g:SimpleTerminalSpecProvider
+delete(cwd_fixture, 'rf')
 
 g:simpleterminal_width = 50.0
 g:simpleterminal_height = 40.0
