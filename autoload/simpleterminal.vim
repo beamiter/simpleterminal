@@ -332,6 +332,12 @@ def InstallTerminalMaps(popup: number)
   win_execute(popup, 'tnoremap <buffer> <silent> <S-F7> <C-\><C-n><Cmd>SimpleTerminalPrev<CR>')
 enddef
 
+def PopupTitle(session: dict<any>): string
+  var alias: string = get(session, 'alias', '')
+  var label = strtrans(get(session, 'name', 'terminal'))
+  return empty(alias) ? $' {label} ' : $' {alias} · {label} '
+enddef
+
 def OpenPopup(session: dict<any>)
   if PopupAlive()
     popup_close(s_popup)
@@ -350,7 +356,7 @@ def OpenPopup(session: dict<any>)
     maxheight: height,
     border: ConfFlag('simpleterminal_border', true) ? [1, 1, 1, 1] : [0, 0, 0, 0],
     borderchars: ['─', '│', '─', '│', '╭', '╮', '╯', '╰'],
-    title: $' {get(session, "name", "terminal")} ',
+    title: PopupTitle(session),
     mapping: false,
     zindex: 250,
     highlight: 'Normal',
@@ -366,7 +372,7 @@ def RefreshTitle(session: dict<any>)
   # and the popup keeps the title it was created with. Only our own popup, and
   # only when it is showing this very session.
   if PopupAlive() && winbufnr(s_popup) == get(session, 'bufnr', -1)
-    popup_setoptions(s_popup, {title: $' {get(session, "name", "terminal")} '})
+    popup_setoptions(s_popup, {title: PopupTitle(session)})
   endif
 enddef
 
@@ -504,60 +510,98 @@ def BaseName(session: dict<any>): string
   return substitute(get(session, 'name', ''), ' (detached)$', '', '')
 enddef
 
-def FindSession(name: string): number
-  # Index of the session called `name`, or -1. The name a session was opened
-  # under still finds it after Detach() renamed it, and a bare buffer number is
-  # accepted too, so a caller that kept Run()'s return value can come back.
-  var wanted = trim(name)
-  if empty(wanted)
-    return -1
-  endif
-  for index in range(len(s_sessions))
-    if s_sessions[index].name ==# wanted
-      return index
-    endif
-  endfor
-  for index in range(len(s_sessions))
-    if BaseName(s_sessions[index]) ==# wanted
-      return index
-    endif
-  endfor
-  if wanted =~# '^\d\+$'
+def AliasSelector(name: string): bool
+  return name =~# '^@[A-Za-z][A-Za-z0-9_-]\{0,31}$'
+enddef
+
+def FindSession(wanted: string): number
+  # Explicit selectors cannot fall through to a similarly named shell.
+  if wanted =~# '^@'
     for index in range(len(s_sessions))
-      if s_sessions[index].bufnr == str2nr(wanted)
+      if get(s_sessions[index], 'alias', '') ==# wanted
         return index
       endif
     endfor
+    return -1
+  elseif wanted =~# '^\d\+$'
+    return IndexOfBuffer(str2nr(wanted))
   endif
-  return -1
+  var found = -1
+  for index in range(len(s_sessions))
+    if s_sessions[index].name ==# wanted || BaseName(s_sessions[index]) ==# wanted
+      if found >= 0
+        return -2
+      endif
+      found = index
+    endif
+  endfor
+  return found
 enddef
 
 export def Select(name: string)
-  # Switch to a session by name (or buffer number) instead of cycling to it.
   Prune()
-  var index = FindSession(name)
-  if index < 0
+  var wanted = trim(name)
+  var index = empty(wanted) ? -1 : FindSession(wanted)
+  if index == -2
+    Warn('ambiguous session name ' .. wanted .. '; use a buffer number or @alias')
+    return
+  elseif index < 0
     Warn(empty(s_sessions) ? 'no terminal session' : 'no session named ' .. name)
     return
   endif
   SetCurrent(index)
 enddef
 
+export def SetAlias(name: string)
+  var target = PopupAlive() ? winbufnr(s_popup) : CurrentBuffer()
+  Prune()
+  var index = IndexOfBuffer(target)
+  if index < 0
+    Warn('no live current terminal to label')
+    return
+  endif
+  var alias = trim(name)
+  if !empty(alias) && !AliasSelector(alias)
+    Warn('alias must be @ followed by 1–32 ASCII letters, digits, _ or -, starting with a letter')
+    return
+  endif
+  if !empty(alias)
+    var owner = FindSession(alias)
+    if owner >= 0 && owner != index
+      Warn('alias already in use: ' .. alias)
+      return
+    endif
+  endif
+  s_sessions[index].alias = alias
+  RefreshTitle(s_sessions[index])
+enddef
+
 export def Complete(arglead: string, _cmdline: string, _cursorpos: number): list<string>
-  # Command-line completion for :SimpleTerminalSelect. Substring rather than
-  # prefix, so 'host' finds 'ssh:host:proj'. No Prune() here: completion must
-  # not wipe buffers behind the user's back.
-  var names = mapnew(s_sessions, (_, session): string => session.name)
-  for session in s_sessions
-    var buf = string(get(session, 'bufnr', 0))
-    if index(names, buf) < 0
-      add(names, buf)
+  # Do not Prune() in completion. Use a live snapshot and omit names shared
+  # by another session (including its pre-detach name).
+  var sessions = filter(copy(s_sessions), (_, session) => SessionAlive(session))
+  var counts: dict<number> = {}
+  for session in sessions
+    var displayed: string = session.name
+    var base = BaseName(session)
+    counts[displayed] = get(counts, displayed, 0) + 1
+    if base !=# displayed
+      counts[base] = get(counts, base, 0) + 1
     endif
   endfor
-  if !empty(arglead)
-    filter(names, (_, name) => stridx(name, arglead) >= 0)
-  endif
-  return names
+  var names: list<string> = []
+  for session in sessions
+    var displayed: string = session.name
+    if displayed !~# '^@\|^\d\+$' && get(counts, displayed, 0) == 1
+      add(names, displayed)
+    endif
+    var alias: string = get(session, 'alias', '')
+    if !empty(alias)
+      add(names, alias)
+    endif
+    add(names, string(session.bufnr))
+  endfor
+  return empty(arglead) ? names : filter(names, (_, name) => stridx(name, arglead) >= 0)
 enddef
 
 export def Kill()
@@ -799,9 +843,17 @@ export def List()
   endif
   for index in range(len(s_sessions))
     var session = s_sessions[index]
-    echomsg printf('%s %d  %s  %s  %s  %s', index == s_current ? '*' : ' ',
-      session.bufnr, get(session, 'remote', false) ? 'R' : 'L', session.name,
-      Target(session), get(session, 'running', false) ? 'running' : 'exited')
+    var workspace = get(session, 'workspace', {})
+    var alias: string = get(session, 'alias', '')
+    var location: string = get(workspace, 'root', '')
+    if empty(location)
+      location = get(session, 'cwd', '')
+    endif
+    echomsg printf('%s %d  %s  %s  %s  %s%s%s', index == s_current ? '*' : ' ',
+      session.bufnr, get(session, 'remote', false) ? 'R' : 'L', strtrans(session.name),
+      strtrans(Target(session)), get(session, 'running', false) ? 'running' : 'exited',
+      empty(alias) ? '' : '  ' .. alias,
+      empty(location) ? '' : '  ' .. strtrans(location))
   endfor
 enddef
 

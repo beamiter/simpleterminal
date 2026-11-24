@@ -14,7 +14,8 @@ SimpleRemote disconnects, that workspace's shells keep running and are labelled
 another one labels the old shells.
 
 Commands: `:SimpleTerminalNew[!] [cmd]`, `:SimpleTerminalToggle`,
-`:SimpleTerminalNext`, `:SimpleTerminalPrev`, `:SimpleTerminalSelect {name}`,
+`:SimpleTerminalNext`, `:SimpleTerminalPrev`, `:SimpleTerminalSelect {name|buffer|@alias}`,
+`:SimpleTerminalAlias [@alias]`,
 `:SimpleTerminalKill`, `:[range]SimpleTerminalSend [text]`,
 `:SimpleTerminalList`, `:SimpleTerminalHealth`.
 
@@ -30,3 +31,8 @@ Use `:SimpleTerminalNew!` to explicitly run locally. `:SimpleTerminalHealth`
 continues to report provider errors without aborting.
 
 See `:help simpleterminal`.
+
+Use `:SimpleTerminalAlias @tests` on a running shell to distinguish it from
+other shells in the same project. Select it with `:SimpleTerminalSelect @tests`;
+`:SimpleTerminalList` shows aliases, working directories or remote roots, and
+buffer numbers. A shared name is refused rather than selecting the first shell.

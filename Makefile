@@ -21,6 +21,7 @@ defcompile:
 
 test:
 	vim -N -u NONE -n -i NONE -es -S tests/vim_smoke.vim
+	vim -N -u NONE -n -i NONE -es -S tests/session_selection.vim
 
 lifecycle:
 	vim -N -u NONE -n -i NONE -es -S tests/lifecycle.vim

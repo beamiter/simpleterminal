@@ -43,11 +43,22 @@ Requires Vim 9.1 with |+terminal| and |+popupwin|.
                 Make the next / previous session current and show it.
 
                                                 *:SimpleTerminalSelect*
-:SimpleTerminalSelect {name}
-                Make the session called {name} current and show it.  {name}
-                completes over the session names; the name a session was
-                opened under still finds it after it was labelled
-                "(detached)", and a bare buffer number is accepted too.
+:SimpleTerminalSelect {name|buffer|@alias}
+                Make the named session current and show it. Its old name
+                still works after detaching if unique. With a shared name,
+                no session is selected: use the buffer number or an @alias.
+                A bare number selects only that buffer; @ selects only an
+                alias. Completion offers unambiguous live targets.
+
+                                                *:SimpleTerminalAlias*
+:SimpleTerminalAlias [@alias]
+                Label the current live session, e.g. @julia, @tests or @shell.
+                Use @ followed by a letter, then up to 31 letters, digits,
+                underscores or hyphens (ASCII, case sensitive). Aliases must
+                be unique within this Vim instance. Omit the argument to
+                clear it. This changes display/selection only: it neither
+                starts a process nor changes the execution target. A session
+                keeps its alias when detached or reattached.
 
 :SimpleTerminalKill                             *:SimpleTerminalKill*
                 Stop the current session's job and wipe its buffer.
@@ -67,7 +78,8 @@ Requires Vim 9.1 with |+terminal| and |+popupwin|.
                 List the sessions, one per line: current marker, buffer
                 number, R for a remote / L for a local shell, name, target
                 (`kind:target` of the workspace, or "local") and whether the
-                shell is still running.
+                shell is still running, followed by its alias and workspace
+                root (or working directory), when present.
 
 :SimpleTerminalHealth                           *:SimpleTerminalHealth*
                 Report the terminal/popup features, the session count and
